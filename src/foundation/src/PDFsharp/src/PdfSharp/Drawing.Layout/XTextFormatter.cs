@@ -72,6 +72,23 @@ namespace PdfSharp.Drawing.Layout
         XRect _layoutRectangle;
 
         /// <summary>
+        /// Gets or sets the letter spacing.
+        /// </summary>
+        public int Kerning {
+            get => _kerning;
+            set => _kerning = value;
+        }
+        int _kerning = 0;
+
+        /// <summary>
+        /// Gets or sets the line height.
+        /// </summary>
+        public double LineHeight {
+            get => _lineSpace;
+            set => _lineSpace = value;
+        }
+        
+        /// <summary>
         /// Gets or sets the alignment of the text.
         /// </summary>
         public XParagraphAlignment Alignment
@@ -115,243 +132,181 @@ namespace PdfSharp.Drawing.Layout
 
             Text = text;
             Font = font;
-            LayoutRectangle = layoutRectangle;
+            _layoutRectangle = layoutRectangle;
 
             if (text.Length == 0)
                 return;
 
-            CreateBlocks();
+            CreateLetters();
 
             CreateLayout();
 
             double dx = layoutRectangle.Location.X;
             double dy = layoutRectangle.Location.Y + _cyAscent;
-            int count = _blocks.Count;
-            for (int idx = 0; idx < count; idx++)
+
+            for (int idx = 0; idx < _lines.Count; idx++)
             {
-                Block block = _blocks[idx];
-                if (block.Stop)
-                    break;
-                if (block.Type == BlockType.LineBreak)
-                    continue;
-                _gfx.DrawString(block.Text, font, brush, dx + block.Location.X, dy + block.Location.Y);
+                Letter[] line = _lines[idx];
+                
+                foreach (Letter letter in line)
+                {
+                    if (letter.Stop)
+                        break;
+
+                    _gfx.DrawString(letter.Value, font, brush, dx + letter.Location.X, dy + letter.Location.Y);
+                }
             }
         }
 
-        void CreateBlocks()
+        void CreateLetters()
         {
-            _blocks.Clear();
-            int length = _text.Length;
-            bool inNonWhiteSpace = false;
-            int startIndex = 0, blockLength = 0;
-            for (int idx = 0; idx < length; idx++)
+            List<Letter> letters = new List<Letter>();
+            List<Letter> word = new List<Letter>();
+
+            for (int idx = 0; idx < _text.Length; idx++)
             {
                 char ch = _text[idx];
 
                 // Treat CR and CRLF as LF
                 if (ch == Chars.CR)
                 {
-                    if (idx < length - 1 && _text[idx + 1] == Chars.LF)
+                    if (idx < _text.Length - 1 && _text[idx + 1] == Chars.LF)
                         idx++;
                     ch = Chars.LF;
                 }
                 if (ch == Chars.LF)
                 {
-                    if (blockLength != 0)
+                    if (word.Count == 0)
+                        word.Add(new Letter(_gfx, ch, _font, _kerning));
+
+                    word[^1].LineBreak = true;
+
+                    if (GetTextWidth(letters) + GetTextWidth(word) >= _layoutRectangle.Width)
                     {
-                        string token = _text.Substring(startIndex, blockLength);
-                        _blocks.Add(new Block(token, BlockType.Text,
-                          _gfx.MeasureString(token, _font).Width));
+                        _lines.Add(letters.ToArray());
+                        letters.Clear();
                     }
-                    startIndex = idx + 1;
-                    blockLength = 0;
-                    _blocks.Add(new Block(BlockType.LineBreak));
-                }
-                // The non-breaking space is whitespace, so we treat it like non-whitespace.
-                else if (ch != Chars.NonBreakableSpace && Char.IsWhiteSpace(ch))
-                {
-                    if (inNonWhiteSpace)
-                    {
-                        string token = _text.Substring(startIndex, blockLength);
-                        _blocks.Add(new Block(token, BlockType.Text,
-                          _gfx.MeasureString(token, _font).Width));
-                        startIndex = idx + 1;
-                        blockLength = 0;
-                    }
-                    else
-                    {
-                        blockLength++;
-                    }
+                    letters.AddRange(word);
+                    _lines.Add(letters.ToArray());
+                    letters.Clear();
+                    word.Clear();
                 }
                 else
                 {
-                    inNonWhiteSpace = true;
-                    blockLength++;
+                    word.Add(new Letter(_gfx, ch, _font, _kerning));
                 }
             }
-            if (blockLength != 0)
+
+            if (word.Count != 0)
             {
-                string token = _text.Substring(startIndex, blockLength);
-                _blocks.Add(new Block(token, BlockType.Text,
-                  _gfx.MeasureString(token, _font).Width));
+                if (GetTextWidth(letters) + GetTextWidth(word) >= _layoutRectangle.Width)
+                {
+                    _lines.Add(letters.ToArray());
+                    letters.Clear();
+                }
+                letters.AddRange(word);
+            }
+
+            if (letters.Count != 0)
+            {
+                _lines.Add(letters.ToArray());
             }
         }
 
         void CreateLayout()
         {
-            double rectWidth = _layoutRectangle.Width;
-            double rectHeight = _layoutRectangle.Height - _cyAscent - _cyDescent;
-            int firstIndex = 0;
-            double x = 0, y = 0;
-            int count = _blocks.Count;
-            for (int idx = 0; idx < count; idx++)
+            for (int idx = 0; idx < _lines.Count; idx++)
             {
-                Block block = _blocks[idx];
-                if (block.Type == BlockType.LineBreak)
+                if (_lines[idx][^1].Value == " ")
                 {
-                    if (Alignment == XParagraphAlignment.Justify)
-                        _blocks[firstIndex].Alignment = XParagraphAlignment.Left;
-                    AlignLine(firstIndex, idx - 1, rectWidth);
-                    firstIndex = idx + 1;
-                    x = 0;
-                    y += _lineSpace;
-                    if (y > rectHeight)
-                    {
-                        block.Stop = true;
+                    _lines[idx] = _lines[idx].ToList().Take(_lines[idx].Length - 1).ToArray();
+                }
+
+                Letter[] line = _lines[idx];
+                double left = 0;
+                double top = 0;
+                double textWidth = GetTextWidth(line);
+
+                switch (_alignment)
+                {
+                    case XParagraphAlignment.Center:
+                        left += (_layoutRectangle.Width - textWidth) / 2;
                         break;
-                    }
-                }
-                else
-                {
-                    double width = block.Width;
-                    if ((x + width <= rectWidth || x == 0) && block.Type != BlockType.LineBreak)
-                    {
-                        block.Location = new XPoint(x, y);
-                        x += width + _spaceWidth;
-                    }
-                    else
-                    {
-                        AlignLine(firstIndex, idx - 1, rectWidth);
-                        firstIndex = idx;
-                        y += _lineSpace;
-                        if (y > rectHeight)
+
+                    case XParagraphAlignment.Right:
+                        left += _layoutRectangle.Width - textWidth;
+                        break;
+
+                    case XParagraphAlignment.Justify:
+                        if (!line[^1].LineBreak && idx < _lines.Count - 1)
                         {
-                            block.Stop = true;
-                            break;
+                            int spaces = line.Where(l => l.IsWhiteSpace).Count();
+                            double offset = (_layoutRectangle.Width - textWidth) / spaces;
+                            line.ToList().ForEach(l => l.Width += offset);
                         }
-                        block.Location = new XPoint(0, y);
-                        x = width + _spaceWidth;
-                    }
+                        break;
+
+                    default:
+                        break;
                 }
-            }
-            if (firstIndex < count && Alignment != XParagraphAlignment.Justify)
-                AlignLine(firstIndex, count - 1, rectWidth);
-        }
 
-        /// <summary>
-        /// Align center, right, or justify.
-        /// </summary>
-        void AlignLine(int firstIndex, int lastIndex, double layoutWidth)
-        {
-            XParagraphAlignment blockAlignment = _blocks[firstIndex].Alignment;
-            if (_alignment == XParagraphAlignment.Left || blockAlignment == XParagraphAlignment.Left)
-                return;
-
-            int count = lastIndex - firstIndex + 1;
-            if (count == 0)
-                return;
-
-            double totalWidth = -_spaceWidth;
-            for (int idx = firstIndex; idx <= lastIndex; idx++)
-                totalWidth += _blocks[idx].Width + _spaceWidth;
-
-            double dx = Math.Max(layoutWidth - totalWidth, 0);
-            //Debug.Assert(dx >= 0);
-            if (_alignment != XParagraphAlignment.Justify)
-            {
-                if (_alignment == XParagraphAlignment.Center)
-                    dx /= 2;
-                for (int idx = firstIndex; idx <= lastIndex; idx++)
+                foreach (Letter letter in line)
                 {
-                    Block block = _blocks[idx];
-                    block.Location += new XSize(dx, 0);
+                    letter.Location = new XPoint(left, top);
+                    left += letter.Width;
                 }
-            }
-            else if (count > 1) // case: justify
-            {
-                dx /= count - 1;
-                for (int idx = firstIndex + 1, i = 1; idx <= lastIndex; idx++, i++)
+
+                top += _lineSpace;
+                if (top >= _layoutRectangle.Height)
                 {
-                    Block block = _blocks[idx];
-                    block.Location += new XSize(dx * i, 0);
+                    line[^1].Stop = true;
+                    break;
                 }
             }
         }
 
-        readonly List<Block> _blocks = new List<Block>();
-
-        enum BlockType
+        double GetTextWidth(IEnumerable<Letter> letters)
         {
-            Text, Space, Hyphen, LineBreak,
+            double width = 0;
+            foreach (Letter letter in letters)
+            {
+                width += letter.Width;
+            }
+            return width;
         }
 
-        /// <summary>
-        /// Represents a single word.
-        /// </summary>
-        class Block
+        readonly List<Letter[]> _lines = new List<Letter[]>();
+
+        class Letter
         {
-            /// <summary>
-            /// Initializes a new instance of the <see cref="Block"/> class.
-            /// </summary>
-            /// <param name="text">The text of the block.</param>
-            /// <param name="type">The type of the block.</param>
-            /// <param name="width">The width of the text.</param>
-            public Block(string text, BlockType type, double width)
-            {
-                Text = text;
-                Type = type;
-                Width = width;
-            }
-
-            /// <summary>
-            /// Initializes a new instance of the <see cref="Block"/> class.
-            /// </summary>
-            /// <param name="type">The type.</param>
-            public Block(BlockType type)
-            {
-                Type = type;
-            }
-
-            /// <summary>
-            /// The text represented by this block.
-            /// </summary>
-            public readonly string Text = default!;
-
-            /// <summary>
-            /// The type of the block.
-            /// </summary>
-            public readonly BlockType Type;
-
-            /// <summary>
-            /// The width of the text.
-            /// </summary>
-            public readonly double Width;
-
-            /// <summary>
-            /// The location relative to the upper left corner of the layout rectangle.
-            /// </summary>
+            public readonly bool IsWhiteSpace;
+            public readonly string Value;
+            public double Width;
+            public bool LineBreak;
             public XPoint Location;
-
-            /// <summary>
-            /// The alignment of this line.
-            /// </summary>
-            public XParagraphAlignment Alignment;
-
-            /// <summary>
-            /// A flag indicating that this is the last block that fits in the layout rectangle.
-            /// </summary>
             public bool Stop;
+
+            public Letter(XGraphics gfx, char letter, XFont font, int kerning)
+            {
+                IsWhiteSpace = Char.IsWhiteSpace(letter);
+                Value = letter.ToString();
+                Width = gfx.MeasureString(Value, font).Width;
+                LineBreak = false;
+                Location = new XPoint();
+                Stop = false;
+
+                if (kerning != 0)
+                {
+                    double geviert = gfx.MeasureString('\u2014'.ToString(), font).Width;
+                    Width -= (double)kerning / 1000 * geviert;
+                }
+            }
         }
+
+        // DONE:
+        // - kerning
+        // - line spacing
+
         // TODO: Possible Improvements for XTextFormatter:
         // - more XStringFormat variations
         // - calculate bounding box
@@ -362,9 +317,7 @@ namespace PdfSharp.Drawing.Layout
         // - text background color
         // - border style
         // - hyphens, soft hyphens, hyphenation
-        // - kerning
         // - change font, size, text color etc.
-        // - line spacing
         // - underline and strike-out variation
         // - super- and sub-script
         // - ...
